@@ -5,6 +5,7 @@
 #include "nvs_flash.h"
 #include "../source/tasks_common.h"
 #include "../source/wifi_app.h"
+#include "ble.h"
 
 void app_main(void)
 {
@@ -18,4 +19,5 @@ void app_main(void)
 
 	// Start Wifi
 	wifi_app_start();
+	ble_app();
 }
