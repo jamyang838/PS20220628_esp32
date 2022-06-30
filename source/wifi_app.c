@@ -9,7 +9,10 @@
 #include "wifi_app.h"
 
 static EventGroupHandle_t wifi_event_group;
-// static EventGroup_t wifi_event_group;
+static void event_handler( void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data )
+{
+
+}
 void wifi_app_start( void )
 {
     ESP_ERROR_CHECK( esp_netif_init() );
@@ -21,6 +24,12 @@ void wifi_app_start( void )
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
+
+    //******************************************
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
+    // esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
+    //******************************************
 
     ESP_ERROR_CHECK( esp_wifi_set_mode( WIFI_MODE_STA ) );
     ESP_ERROR_CHECK( esp_wifi_start() );
