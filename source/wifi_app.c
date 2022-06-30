@@ -1,233 +1,737 @@
-/*
- * wifi_app.c
- *
- *  Created on: Oct 17, 2021
- *      Author: kjagu
- */
+/* ESP HTTP Client Example
 
+   This example code is in the Public Domain (or CC0 licensed, at your option.)
+
+   Unless required by applicable law or agreed to in writing, this
+   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+   CONDITIONS OF ANY KIND, either express or implied.
+*/
+
+#include <string.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/task.h"
-
-#include "esp_err.h"
 #include "esp_log.h"
-#include "esp_wifi.h"
-#include "lwip/netdb.h"
+#include "esp_system.h"
+#include "nvs_flash.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "protocol_examples_common.h"
+#include "esp_tls.h"
+#include "esp_crt_bundle.h"
 
-#include "rgb_led.h"
-#include "tasks_common.h"
+#include "esp_http_client.h"
 #include "wifi_app.h"
-//#include "http_server.h"
 
-// Tag used for ESP serial console messages
-static const char TAG [] = "wifi_app";
+#define MAX_HTTP_RECV_BUFFER 512
+#define MAX_HTTP_OUTPUT_BUFFER 2048
+static const char *TAG = "HTTP_CLIENT";
 
-// Queue handle used to manipulate the main queue of events
-static QueueHandle_t wifi_app_queue_handle;
+/* Root cert for howsmyssl.com, taken from howsmyssl_com_root_cert.pem
 
-// netif objects for the station and access point
-esp_netif_t* esp_netif_sta = NULL;
-esp_netif_t* esp_netif_ap  = NULL;
+   The PEM file was extracted from the output of this command:
+   openssl s_client -showcerts -connect www.howsmyssl.com:443 </dev/null
 
-/**
- * WiFi application event handler
- * @param arg data, aside from event data, that is passed to the handler when it is called
- * @param event_base the base id of the event to register the handler for
- * @param event_id the id fo the event to register the handler for
- * @param event_data event data
+   The CA root cert is the last cert given in the chain of certs.
+
+   To embed it in the app binary, the PEM file is named
+   in the component.mk COMPONENT_EMBED_TXTFILES variable.
+*/
+// extern const char howsmyssl_com_root_cert_pem_start[] asm("_binary_howsmyssl_com_root_cert_pem_start");
+// extern const char howsmyssl_com_root_cert_pem_end[]   asm("_binary_howsmyssl_com_root_cert_pem_end");
+
+// extern const char postman_root_cert_pem_start[] asm("_binary_postman_root_cert_pem_start");
+// extern const char postman_root_cert_pem_end[]   asm("_binary_postman_root_cert_pem_end");
+
+
+esp_err_t _http_event_handler(esp_http_client_event_t *evt)
+{
+    static char *output_buffer;  // Buffer to store response of http request from event handler
+    static int output_len;       // Stores number of bytes read
+    switch(evt->event_id) {
+        case HTTP_EVENT_ERROR:
+            ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
+            break;
+        case HTTP_EVENT_ON_CONNECTED:
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
+            break;
+        case HTTP_EVENT_HEADER_SENT:
+            ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
+            break;
+        case HTTP_EVENT_ON_HEADER:
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+            break;
+        case HTTP_EVENT_ON_DATA:
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+            /*
+             *  Check for chunked encoding is added as the URL for chunked encoding used in this example returns binary data.
+             *  However, event handler can also be used in case chunked encoding is used.
+             */
+            if (!esp_http_client_is_chunked_response(evt->client)) {
+                // If user_data buffer is configured, copy the response into the buffer
+                if (evt->user_data) {
+                    memcpy(evt->user_data + output_len, evt->data, evt->data_len);
+                } else {
+                    if (output_buffer == NULL) {
+                        output_buffer = (char *) malloc(esp_http_client_get_content_length(evt->client));
+                        output_len = 0;
+                        if (output_buffer == NULL) {
+                            ESP_LOGE(TAG, "Failed to allocate memory for output buffer");
+                            return ESP_FAIL;
+                        }
+                    }
+                    memcpy(output_buffer + output_len, evt->data, evt->data_len);
+                }
+                output_len += evt->data_len;
+            }
+
+            break;
+        case HTTP_EVENT_ON_FINISH:
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
+            if (output_buffer != NULL) {
+                // Response is accumulated in output_buffer. Uncomment the below line to print the accumulated response
+                // ESP_LOG_BUFFER_HEX(TAG, output_buffer, output_len);
+                free(output_buffer);
+                output_buffer = NULL;
+            }
+            output_len = 0;
+            break;
+        case HTTP_EVENT_DISCONNECTED:
+            ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
+            int mbedtls_err = 0;
+            esp_err_t err = esp_tls_get_and_clear_last_error(evt->data, &mbedtls_err, NULL);
+            if (err != 0) {
+                ESP_LOGI(TAG, "Last esp error code: 0x%x", err);
+                ESP_LOGI(TAG, "Last mbedtls failure: 0x%x", mbedtls_err);
+            }
+            if (output_buffer != NULL) {
+                free(output_buffer);
+                output_buffer = NULL;
+            }
+            output_len = 0;
+            break;
+    }
+    return ESP_OK;
+}
+
+static void http_rest_with_url(void)
+{
+    char local_response_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};
+    /**
+     * NOTE: All the configuration parameters for http_client must be spefied either in URL or as host and path parameters.
+     * If host and path parameters are not set, query parameter will be ignored. In such cases,
+     * query parameter should be specified in URL.
+     *
+     * If URL as well as host and path parameters are specified, values of host and path will be considered.
+     */
+    esp_http_client_config_t config = {
+        .host = "httpbin.org",
+        .path = "/get",
+        .query = "esp",
+        .event_handler = _http_event_handler,
+        .user_data = local_response_buffer,        // Pass address of local buffer to get response
+        .disable_auto_redirect = true,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    // GET
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP GET Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
+    }
+    ESP_LOG_BUFFER_HEX(TAG, local_response_buffer, strlen(local_response_buffer));
+
+    // POST
+    const char *post_data = "{\"field1\":\"value1\"}";
+    esp_http_client_set_url(client, "http://httpbin.org/post");
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, post_data, strlen(post_data));
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP POST Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
+    }
+
+    //PUT
+    esp_http_client_set_url(client, "http://httpbin.org/put");
+    esp_http_client_set_method(client, HTTP_METHOD_PUT);
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP PUT Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP PUT request failed: %s", esp_err_to_name(err));
+    }
+
+    //PATCH
+    esp_http_client_set_url(client, "http://httpbin.org/patch");
+    esp_http_client_set_method(client, HTTP_METHOD_PATCH);
+    esp_http_client_set_post_field(client, NULL, 0);
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP PATCH Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP PATCH request failed: %s", esp_err_to_name(err));
+    }
+
+    //DELETE
+    esp_http_client_set_url(client, "http://httpbin.org/delete");
+    esp_http_client_set_method(client, HTTP_METHOD_DELETE);
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP DELETE Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP DELETE request failed: %s", esp_err_to_name(err));
+    }
+
+    //HEAD
+    esp_http_client_set_url(client, "http://httpbin.org/get");
+    esp_http_client_set_method(client, HTTP_METHOD_HEAD);
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP HEAD Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP HEAD request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+}
+
+static void http_rest_with_hostname_path(void)
+{
+    esp_http_client_config_t config = {
+        .host = "httpbin.org",
+        .path = "/get",
+        .transport_type = HTTP_TRANSPORT_OVER_TCP,
+        .event_handler = _http_event_handler,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    // GET
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP GET Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
+    }
+
+    // POST
+    const char *post_data = "field1=value1&field2=value2";
+    esp_http_client_set_url(client, "/post");
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_post_field(client, post_data, strlen(post_data));
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP POST Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
+    }
+
+    //PUT
+    esp_http_client_set_url(client, "/put");
+    esp_http_client_set_method(client, HTTP_METHOD_PUT);
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP PUT Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP PUT request failed: %s", esp_err_to_name(err));
+    }
+
+    //PATCH
+    esp_http_client_set_url(client, "/patch");
+    esp_http_client_set_method(client, HTTP_METHOD_PATCH);
+    esp_http_client_set_post_field(client, NULL, 0);
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP PATCH Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP PATCH request failed: %s", esp_err_to_name(err));
+    }
+
+    //DELETE
+    esp_http_client_set_url(client, "/delete");
+    esp_http_client_set_method(client, HTTP_METHOD_DELETE);
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP DELETE Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP DELETE request failed: %s", esp_err_to_name(err));
+    }
+
+    //HEAD
+    esp_http_client_set_url(client, "/get");
+    esp_http_client_set_method(client, HTTP_METHOD_HEAD);
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP HEAD Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP HEAD request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+}
+
+#if CONFIG_ESP_HTTP_CLIENT_ENABLE_BASIC_AUTH
+static void http_auth_basic(void)
+{
+    /**
+     * Note: `max_authorization_retries` in esp_http_client_config_t
+     * can be used to configure number of retry attempts to be performed
+     * in case unauthorized status code is received.
+     *
+     * To disable authorization retries, set max_authorization_retries to -1.
+     */
+    esp_http_client_config_t config = {
+        .url = "http://user:passwd@httpbin.org/basic-auth/user/passwd",
+        .event_handler = _http_event_handler,
+        .auth_type = HTTP_AUTH_TYPE_BASIC,
+        .max_authorization_retries = -1,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP Basic Auth Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+
+static void http_auth_basic_redirect(void)
+{
+    esp_http_client_config_t config = {
+        .url = "http://user:passwd@httpbin.org/basic-auth/user/passwd",
+        .event_handler = _http_event_handler,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP Basic Auth redirect Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+#endif
+
+#if CONFIG_ESP_HTTP_CLIENT_ENABLE_DIGEST_AUTH
+static void http_auth_digest(void)
+{
+    esp_http_client_config_t config = {
+        .url = "http://user:passwd@httpbin.org/digest-auth/auth/user/passwd/MD5/never",
+        .event_handler = _http_event_handler,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP Digest Auth Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+#endif
+
+static void https_with_url(void)
+{
+    esp_http_client_config_t config = {
+        .url = "https://www.howsmyssl.com",
+        .event_handler = _http_event_handler,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTPS Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+
+static void https_with_hostname_path(void)
+{
+    esp_http_client_config_t config = {
+        .host = "www.howsmyssl.com",
+        .path = "/",
+        .transport_type = HTTP_TRANSPORT_OVER_SSL,
+        .event_handler = _http_event_handler,
+        // .cert_pem = howsmyssl_com_root_cert_pem_start,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTPS Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+
+static void http_relative_redirect(void)
+{
+    esp_http_client_config_t config = {
+        .url = "http://httpbin.org/relative-redirect/3",
+        .event_handler = _http_event_handler,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP Relative path redirect Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+
+static void http_absolute_redirect(void)
+{
+    esp_http_client_config_t config = {
+        .url = "http://httpbin.org/absolute-redirect/3",
+        .event_handler = _http_event_handler,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP Absolute path redirect Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+
+static void http_redirect_to_https(void)
+{
+    esp_http_client_config_t config = {
+        .url = "http://httpbin.org/redirect-to?url=https%3A%2F%2Fwww.howsmyssl.com",
+        .event_handler = _http_event_handler,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP redirect to HTTPS Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+
+
+static void http_download_chunk(void)
+{
+    esp_http_client_config_t config = {
+        .url = "http://httpbin.org/stream-bytes/8912",
+        .event_handler = _http_event_handler,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP chunk encoding Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+
+static void http_perform_as_stream_reader(void)
+{
+    char *buffer = malloc(MAX_HTTP_RECV_BUFFER + 1);
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "Cannot malloc http receive buffer");
+        return;
+    }
+    esp_http_client_config_t config = {
+        .url = "http://httpbin.org/get",
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err;
+    if ((err = esp_http_client_open(client, 0)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+        free(buffer);
+        return;
+    }
+    int content_length =  esp_http_client_fetch_headers(client);
+    int total_read_len = 0, read_len;
+    if (total_read_len < content_length && content_length <= MAX_HTTP_RECV_BUFFER) {
+        read_len = esp_http_client_read(client, buffer, content_length);
+        if (read_len <= 0) {
+            ESP_LOGE(TAG, "Error read data");
+        }
+        buffer[read_len] = 0;
+        ESP_LOGD(TAG, "read_len = %d", read_len);
+    }
+    ESP_LOGI(TAG, "HTTP Stream reader Status = %d, content_length = %d",
+                    esp_http_client_get_status_code(client),
+                    esp_http_client_get_content_length(client));
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    free(buffer);
+}
+
+static void https_async(void)
+{
+    esp_http_client_config_t config = {
+        .url = "https://postman-echo.com/post",
+        .event_handler = _http_event_handler,
+        // .cert_pem = postman_root_cert_pem_start,
+        .is_async = true,
+        .timeout_ms = 5000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err;
+    const char *post_data = "Using a Palantír requires a person with great strength of will and wisdom. The Palantíri were meant to "
+                            "be used by the Dúnedain to communicate throughout the Realms in Exile. During the War of the Ring, "
+                            "the Palantíri were used by many individuals. Sauron used the Ithil-stone to take advantage of the users "
+                            "of the other two stones, the Orthanc-stone and Anor-stone, but was also susceptible to deception himself.";
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_post_field(client, post_data, strlen(post_data));
+    while (1) {
+        err = esp_http_client_perform(client);
+        if (err != ESP_ERR_HTTP_EAGAIN) {
+            break;
+        }
+    }
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTPS Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+
+static void https_with_invalid_url(void)
+{
+    esp_http_client_config_t config = {
+            .url = "https://not.existent.url",
+            .event_handler = _http_event_handler,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTPS Status = %d, content_length = %d",
+                 esp_http_client_get_status_code(client),
+                 esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
+
+/*
+ *  http_native_request() demonstrates use of low level APIs to connect to a server,
+ *  make a http request and read response. Event handler is not used in this case.
+ *  Note: This approach should only be used in case use of low level APIs is required.
+ *  The easiest way is to use esp_http_perform()
  */
-static void wifi_app_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+static void http_native_request(void)
 {
-	if (event_base == WIFI_EVENT)
-	{
-		switch (event_id)
-		{
-			case WIFI_EVENT_AP_START:
-				ESP_LOGI(TAG, "WIFI_EVENT_AP_START");
-				break;
+    char output_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};   // Buffer to store response of http request
+    int content_length = 0;
+    esp_http_client_config_t config = {
+        .url = "http://httpbin.org/get",
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
 
-			case WIFI_EVENT_AP_STOP:
-				ESP_LOGI(TAG, "WIFI_EVENT_AP_STOP");
-				break;
+    // GET Request
+    esp_http_client_set_method(client, HTTP_METHOD_GET);
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+    } else {
+        content_length = esp_http_client_fetch_headers(client);
+        if (content_length < 0) {
+            ESP_LOGE(TAG, "HTTP client fetch headers failed");
+        } else {
+            int data_read = esp_http_client_read_response(client, output_buffer, MAX_HTTP_OUTPUT_BUFFER);
+            if (data_read >= 0) {
+                ESP_LOGI(TAG, "HTTP GET Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+                ESP_LOG_BUFFER_HEX(TAG, output_buffer, data_read);
+            } else {
+                ESP_LOGE(TAG, "Failed to read response");
+            }
+        }
+    }
+    esp_http_client_close(client);
 
-			case WIFI_EVENT_AP_STACONNECTED:
-				ESP_LOGI(TAG, "WIFI_EVENT_AP_STACONNECTED");
-				break;
-
-			case WIFI_EVENT_AP_STADISCONNECTED:
-				ESP_LOGI(TAG, "WIFI_EVENT_AP_STADISCONNECTED");
-				break;
-
-			case WIFI_EVENT_STA_START:
-				ESP_LOGI(TAG, "WIFI_EVENT_STA_START");
-				break;
-
-			case WIFI_EVENT_STA_CONNECTED:
-				ESP_LOGI(TAG, "WIFI_EVENT_STA_CONNECTED");
-				break;
-
-			case WIFI_EVENT_STA_DISCONNECTED:
-				ESP_LOGI(TAG, "WIFI_EVENT_STA_DISCONNECTED");
-				break;
-		}
-	}
-	else if (event_base == IP_EVENT)
-	{
-		switch (event_id)
-		{
-			case IP_EVENT_STA_GOT_IP:
-				ESP_LOGI(TAG, "IP_EVENT_STA_GOT_IP");
-				break;
-		}
-	}
+    // POST Request
+    const char *post_data = "{\"field1\":\"value1\"}";
+    esp_http_client_set_url(client, "http://httpbin.org/post");
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    err = esp_http_client_open(client, strlen(post_data));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+    } else {
+        int wlen = esp_http_client_write(client, post_data, strlen(post_data));
+        if (wlen < 0) {
+            ESP_LOGE(TAG, "Write failed");
+        }
+        content_length = esp_http_client_fetch_headers(client);
+        if (content_length < 0) {
+            ESP_LOGE(TAG, "HTTP client fetch headers failed");
+        } else {
+            int data_read = esp_http_client_read_response(client, output_buffer, MAX_HTTP_OUTPUT_BUFFER);
+            if (data_read >= 0) {
+                ESP_LOGI(TAG, "HTTP POST Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+                ESP_LOG_BUFFER_HEX(TAG, output_buffer, strlen(output_buffer));
+            } else {
+                ESP_LOGE(TAG, "Failed to read response");
+            }
+        }
+    }
+    esp_http_client_cleanup(client);
 }
 
-/**
- * Initializes the WiFi application event handler for WiFi and IP events.
- */
-static void wifi_app_event_handler_init(void)
+static void http_partial_download(void)
 {
-	// Event loop for the WiFi driver
-	ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_http_client_config_t config = {
+        .url = "https://dl.espressif.com/dl/esp-idf/ci/esp_http_client_demo.txt",
+        .event_handler = _http_event_handler,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
 
-	// Event handler for the connection
-	esp_event_handler_instance_t instance_wifi_event;
-	esp_event_handler_instance_t instance_ip_event;
-	ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_app_event_handler, NULL, &instance_wifi_event));
-	ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, &wifi_app_event_handler, NULL, &instance_ip_event));
+    // Download a file excluding first 10 bytes
+    esp_http_client_set_header(client, "Range", "bytes=10-");
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+    }
+
+    // Download last 10 bytes of a file
+    esp_http_client_set_header(client, "Range", "bytes=-10");
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+    }
+
+    // Download 10 bytes from 11 to 20
+    esp_http_client_set_header(client, "Range", "bytes=11-20");
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
 }
 
-/**
- * Initializes the TCP stack and default WiFi configuration.
- */
-static void wifi_app_default_wifi_init(void)
+static void http_test_task(void *pvParameters)
 {
-	// Initialize the TCP stack
-	ESP_ERROR_CHECK(esp_netif_init());
+    http_rest_with_url();
+    http_rest_with_hostname_path();
+#if CONFIG_ESP_HTTP_CLIENT_ENABLE_BASIC_AUTH
+    http_auth_basic();
+    http_auth_basic_redirect();
+#endif
+#if CONFIG_ESP_HTTP_CLIENT_ENABLE_DIGEST_AUTH
+    http_auth_digest();
+#endif
+    http_relative_redirect();
+    http_absolute_redirect();
+    https_with_url();
+    https_with_hostname_path();
+    http_redirect_to_https();
+    http_download_chunk();
+    http_perform_as_stream_reader();
+    https_async();
+    https_with_invalid_url();
+    http_native_request();
+    http_partial_download();
 
-	// Default WiFi config - operations must be in this order!
-	wifi_init_config_t wifi_init_config = WIFI_INIT_CONFIG_DEFAULT();
-	ESP_ERROR_CHECK(esp_wifi_init(&wifi_init_config));
-	ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-	esp_netif_sta = esp_netif_create_default_wifi_sta();
-	esp_netif_ap = esp_netif_create_default_wifi_ap();
+    ESP_LOGI(TAG, "Finish http example");
+    vTaskDelete(NULL);
 }
 
-/**
- * Configures the WiFi access point settings and assigns the static IP to the SoftAP.
- */
-static void wifi_app_soft_ap_config(void)
+void app_start(void)
 {
-	// SoftAP - WiFi access point configuration
-	wifi_config_t ap_config =
-	{
-		.ap = {
-				.ssid = WIFI_AP_SSID,
-				.ssid_len = strlen(WIFI_AP_SSID),
-				.password = WIFI_AP_PASSWORD,
-				.channel = WIFI_AP_CHANNEL,
-				.ssid_hidden = WIFI_AP_SSID_HIDDEN,
-				.authmode = WIFI_AUTH_WPA2_PSK,
-				.max_connection = WIFI_AP_MAX_CONNECTIONS,
-				.beacon_interval = WIFI_AP_BEACON_INTERVAL,
-		},
-	};
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-	// Configure DHCP for the AP
-	esp_netif_ip_info_t ap_ip_info;
-	memset(&ap_ip_info, 0x00, sizeof(ap_ip_info));
+    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
+     * Read "Establishing Wi-Fi or Ethernet Connection" section in
+     * examples/protocols/README.md for more information about this function.
+     */
+    ESP_ERROR_CHECK(example_connect());
+    ESP_LOGI(TAG, "Connected to AP, begin http example");
 
-	esp_netif_dhcps_stop(esp_netif_ap);					///> must call this first
-	inet_pton(AF_INET, WIFI_AP_IP, &ap_ip_info.ip);		///> Assign access point's static IP, GW, and netmask
-	inet_pton(AF_INET, WIFI_AP_GATEWAY, &ap_ip_info.gw);
-	inet_pton(AF_INET, WIFI_AP_NETMASK, &ap_ip_info.netmask);
-	ESP_ERROR_CHECK(esp_netif_set_ip_info(esp_netif_ap, &ap_ip_info));			///> Statically configure the network interface
-	ESP_ERROR_CHECK(esp_netif_dhcps_start(esp_netif_ap));						///> Start the AP DHCP server (for connecting stations e.g. your mobile device)
-
-	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));						///> Setting the mode as Access Point / Station Mode
-	ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &ap_config));			///> Set our configuration
-	ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_AP_BANDWIDTH));		///> Our default bandwidth 20 MHz
-	ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_STA_POWER_SAVE));						///> Power save set to "NONE"
-
+    xTaskCreate(&http_test_task, "http_test_task", 8192, NULL, 5, NULL);
 }
-
-/**
- * Main task for the WiFi application
- * @param pvParameters parameter which can be passed to the task
- */
-static void wifi_app_task(void *pvParameters)
-{
-	wifi_app_queue_message_t msg;
-
-	// Initialize the event handler
-	wifi_app_event_handler_init();
-
-	// Initialize the TCP/IP stack and WiFi config
-	wifi_app_default_wifi_init();
-
-	// SoftAP config
-	wifi_app_soft_ap_config();
-
-	// Start WiFi
-	ESP_ERROR_CHECK(esp_wifi_start());
-
-	// Send first event message
-	wifi_app_send_message(WIFI_APP_MSG_START_HTTP_SERVER);
-
-	for (;;)
-	{
-		if (xQueueReceive(wifi_app_queue_handle, &msg, portMAX_DELAY))
-		{
-			switch (msg.msgID)
-			{
-				case WIFI_APP_MSG_START_HTTP_SERVER:
-					ESP_LOGI(TAG, "WIFI_APP_MSG_START_HTTP_SERVER");
-
-//					http_server_start();
-					rgb_led_http_server_started();
-
-					break;
-
-				case WIFI_APP_MSG_CONNECTING_FROM_HTTP_SERVER:
-					ESP_LOGI(TAG, "WIFI_APP_MSG_CONNECTING_FROM_HTTP_SERVER");
-
-					break;
-
-				case WIFI_APP_MSG_STA_CONNECTED_GOT_IP:
-					ESP_LOGI(TAG, "WIFI_APP_MSG_STA_CONNECTED_GOT_IP");
-					rgb_led_wifi_connected();
-
-					break;
-
-				default:
-					break;
-
-			}
-		}
-	}
-}
-
-BaseType_t wifi_app_send_message(wifi_app_message_e msgID)
-{
-	wifi_app_queue_message_t msg;
-	msg.msgID = msgID;
-	return xQueueSend(wifi_app_queue_handle, &msg, portMAX_DELAY);
-}
-
-void wifi_app_start(void)
-{
-	ESP_LOGI(TAG, "STARTING WIFI APPLICATION");
-
-	// Start WiFi started LED
-	rgb_led_wifi_app_started();
-
-	// Disable default WiFi logging messages
-	esp_log_level_set("wifi",  ESP_LOG_NONE);
-
-	// Create message queue
-	wifi_app_queue_handle = xQueueCreate(3, sizeof(wifi_app_queue_message_t));
-
-	// Start the WiFi application task
-	xTaskCreatePinnedToCore(&wifi_app_task, "wifi_app_task", WIFI_APP_TASK_STACK_SIZE, NULL, WIFI_APP_TASK_PRIORITY, NULL, WIFI_APP_TASK_CORE_ID);
-}
-
