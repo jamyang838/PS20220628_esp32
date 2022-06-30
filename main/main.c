@@ -18,6 +18,7 @@ void app_main(void)
 	ESP_ERROR_CHECK(ret);
 
 	// Start Wifi
+	// app_start();
+	wifi_app_start();
 	ble_app();
-	app_start();
 }
