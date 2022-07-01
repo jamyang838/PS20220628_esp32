@@ -1,12 +1,15 @@
+// #include <string.h>
+// #include <stdlib.h>
 #include "esp_log.h"
 #include "esp_wifi.h"
+#include "freertos/event_groups.h"
+#include "wifi_app.h"
+// #include "esp_wpa2.h"
 // #include "esp_system.h"
 // #include "esp_event.h"
 // #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 // #include "freertos/task.h"
 // #include "esp_netif.h"
-#include "wifi_app.h"
 
 static EventGroupHandle_t wifi_event_group;
 static void event_handler( void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data )
@@ -28,7 +31,7 @@ void wifi_app_start( void )
     //******************************************    
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
     esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
-    esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
+    // esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
     //******************************************
 
     ESP_ERROR_CHECK( esp_wifi_set_mode( WIFI_MODE_STA ) );
