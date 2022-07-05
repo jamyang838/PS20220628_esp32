@@ -50,16 +50,9 @@ static QueueHandle_t wifi_app_queue_handle;
 static wifi_app_queue_message_t m;
 void wifi_connect_event(wifi_app_message_e event_type, char* content)
 {
-    // ESP_LOGI("yang", "%d", event_type);
-    ESP_LOGI("yang", "content: %s", (char* )content);    
-    //  wifi_app_queue_message_t m1 = {     
-    //     // .content = (char*)content,
-    //     .msgID = event_type
-    //  };
-    //  m = m1;
     m.msgID = event_type;
     strcpy(m.content, content);
-    ESP_LOGI("yang", "m.content: %s", m.content);    
+    ESP_LOGI("yang", "m.content: %s", m.content);
     xQueueSend(wifi_app_queue_handle, &m , 10/portTICK_PERIOD_MS );
 }
 void wifi_app_start( void* arg )
