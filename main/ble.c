@@ -550,12 +550,16 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                     memset(_msg, 0, 32);
                     strncpy(_msg,(char *)(p_data->write.value),p_data->write.len);
                     char* s0 = strtok(_msg, ":"); 
-                    char* s1 = strtok(NULL, ":"); 
+                    char* s1 = strtok(NULL, "\0"); 
                     if( s1 != NULL )
                     {
-                        if( !strcmp(s1, "ssid") )
-                        wifi_connect_event(STA_SSID, _msg);                                                
-                    }
+                        if( !strcmp(s0, "ssid") )
+                            wifi_connect_event(STA_SSID, s1);                                                
+                        else if( !strcmp(s0, "password") )
+                            wifi_connect_event(STA_PASSWORD, s1);
+                        else if(!strcmp(s0, "connect") )
+                            wifi_connect_event(STA_RECONNECT, s1);
+                    }   
                     
 #endif
                 }else{
