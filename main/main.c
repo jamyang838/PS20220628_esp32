@@ -19,6 +19,6 @@ void app_main(void)
 
 	// Start Wifi
 	// app_start();
-	wifi_app_start();
+	// wifi_app();
 	ble_app();
 }
