@@ -22,6 +22,7 @@
 #include "esp_bt_defs.h"
 #include "esp_bt_main.h"
 #include "ble.h"
+#include "wifi_app.h"
 
 #define GATTS_TABLE_TAG  "GATTS_SPP_DEMO"
 
@@ -511,6 +512,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             if(p_data->write.is_prep == false){
                 ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_WRITE_EVT : handle = %d\n", res);
                 if(res == SPP_IDX_SPP_COMMAND_VAL){
+                    ESP_LOGI("yang","test1");
                     uint8_t * spp_cmd_buff = NULL;
                     spp_cmd_buff = (uint8_t *)malloc((spp_mtu_size - 3) * sizeof(uint8_t));
                     if(spp_cmd_buff == NULL){
@@ -518,9 +520,10 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                         break;
                     }
                     memset(spp_cmd_buff,0x0,(spp_mtu_size - 3));
-                    memcpy(spp_cmd_buff,p_data->write.value,p_data->write.len);
-                    xQueueSend(cmd_cmd_queue,&spp_cmd_buff,10/portTICK_PERIOD_MS);
+                    memcpy(spp_cmd_buff,p_data->write.value,p_data->write.len);                                        
+                    xQueueSend(cmd_cmd_queue,&spp_cmd_buff,10/portTICK_PERIOD_MS);                    
                 }else if(res == SPP_IDX_SPP_DATA_NTF_CFG){
+                    ESP_LOGI("yang","test2");
                     if((p_data->write.len == 2)&&(p_data->write.value[0] == 0x01)&&(p_data->write.value[1] == 0x00)){
                         enable_data_ntf = true;
                     }else if((p_data->write.len == 2)&&(p_data->write.value[0] == 0x00)&&(p_data->write.value[1] == 0x00)){
@@ -545,6 +548,11 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                     esp_log_buffer_char(GATTS_TABLE_TAG,(char *)(p_data->write.value),p_data->write.len);
 #else
                     uart_write_bytes(UART_NUM_0, (char *)(p_data->write.value), p_data->write.len);
+                    char _msg[32];
+                    memset(_msg, 0, 32);
+                    strncpy(_msg,(char *)(p_data->write.value),p_data->write.len);
+                    wifi_connect_event(STA_SSID, _msg);
+                    ESP_LOGI("yang","test3");
 #endif
                 }else{
                     //TODO:

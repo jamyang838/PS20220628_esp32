@@ -47,11 +47,20 @@ void wifi_reconnect( char* ssid, char* password )
 static char ssid[32]; 
 static char password[64];
 static QueueHandle_t wifi_app_queue_handle;
-
+static wifi_app_queue_message_t m;
 void wifi_connect_event(wifi_app_message_e event_type, char* content)
 {
-    ESP_LOGI(TAG,"reciveve event");
-    xQueueSend(wifi_app_queue_handle, content , 10/portTICK_PERIOD_MS );
+    // ESP_LOGI("yang", "%d", event_type);
+    ESP_LOGI("yang", "content: %s", (char* )content);    
+    //  wifi_app_queue_message_t m1 = {     
+    //     // .content = (char*)content,
+    //     .msgID = event_type
+    //  };
+    //  m = m1;
+    m.msgID = event_type;
+    strcpy(m.content, content);
+    ESP_LOGI("yang", "m.content: %s", m.content);    
+    xQueueSend(wifi_app_queue_handle, &m , 10/portTICK_PERIOD_MS );
 }
 void wifi_app_start( void* arg )
 {    
@@ -88,21 +97,25 @@ void wifi_app_start( void* arg )
     ESP_ERROR_CHECK( esp_wifi_start() );
     for (;;)
     {
-        //  if (xQueueReceive(wifi_app_queue_handle, (void * )&msg, (portTickType)portMAX_DELAY)) {
-        //     ESP_LOGI(TAG,"Change auth");
-        //     switch (msg.msgID) {
-        //         case STA_SSID:
-        //         strcpy(ssid, msg.content);
-        //         ESP_LOGI(TAG, "%s", ssid );
-        //         break;
-        //         case STA_PASSWORD:
-        //         break;
-        //         case STA_RECONNECT:
-        //         break;
-        //         default:
-        //         break;
-        //     }
-        //  }
+         if (xQueueReceive(wifi_app_queue_handle, (void * )&msg, (portTickType)portMAX_DELAY)) {
+            ESP_LOGI(TAG,"%d",msg.msgID);
+            ESP_LOGI(TAG,"%d",STA_SSID);
+            
+            switch (msg.msgID) {
+                case STA_SSID:
+                ESP_LOGI("yang","test4");
+                memset(ssid, 0, 32);
+                strcpy(ssid, msg.content);
+                ESP_LOGI(TAG, "%s", ssid );
+                break;
+                case STA_PASSWORD:
+                break;
+                case STA_RECONNECT:
+                break;
+                default:
+                break;
+            }
+         }
          vTaskDelay(20 / portTICK_PERIOD_MS);
     }
     
@@ -110,6 +123,6 @@ void wifi_app_start( void* arg )
 
 void wifi_app(void)
 {
-    // wifi_app_queue_handle = xQueueCreate(3, sizeof(wifi_app_queue_message_t));
-    xTaskCreate(&wifi_app_start, "wifiapp", 8192, NULL, 5, NULL);    
+    wifi_app_queue_handle = xQueueCreate(3, sizeof(wifi_app_queue_message_t));
+    xTaskCreate(&wifi_app_start, "wifiapp", 8192, NULL,6, NULL);    
 }

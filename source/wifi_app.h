@@ -11,7 +11,7 @@ typedef enum wifi_app_message
 typedef struct wifi_app_queue_message
 {
 	wifi_app_message_e msgID;
-    char* content;
+    char content[64];
 } wifi_app_queue_message_t;
 
 void wifi_connect_event(wifi_app_message_e event_type, char* content);
