@@ -7,6 +7,9 @@
 #include "../source/wifi_app.h"
 #include "ble.h"
 
+#include "trail_element.h"
+#include "oled.h"
+
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -21,4 +24,5 @@ void app_main(void)
 	// app_start();
 	wifi_app();
 	ble_app();
+	ssd1306_app();
 }

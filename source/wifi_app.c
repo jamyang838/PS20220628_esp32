@@ -38,19 +38,19 @@ void wifi_reconnect(char *ssid, char *password)
     wifi_config_t wifi_cfg_ = {
         .sta = {
             .threshold.authmode = WIFI_AUTH_WPA2_PSK}};
-            memset(wifi_cfg_.sta.ssid,0,32);
-            memset(wifi_cfg_.sta.password,0,64);
+    memset(wifi_cfg_.sta.ssid, 0, 32);
+    memset(wifi_cfg_.sta.password, 0, 64);
     strcpy((char *)wifi_cfg_.sta.ssid, ssid);
     strcpy((char *)wifi_cfg_.sta.password, password);
     // ESP_LOGI(TAG, "%s", wifi_cfg_.sta.ssid);
     // ESP_LOGI(TAG, "%s",wifi_cfg_.sta.password);
     ESP_LOGI(TAG, "%s", ssid);
-    ESP_LOGI(TAG, "%s",password);
+    ESP_LOGI(TAG, "%s", password);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg_));
     // esp_wifi_connect();
-    ESP_ERROR_CHECK(esp_wifi_disconnect() );
-    ESP_ERROR_CHECK(esp_wifi_stop() );
-    ESP_ERROR_CHECK( esp_wifi_start() );
+    ESP_ERROR_CHECK(esp_wifi_disconnect());
+    ESP_ERROR_CHECK(esp_wifi_stop());
+    ESP_ERROR_CHECK(esp_wifi_start());
 }
 
 static char ssid[32];
