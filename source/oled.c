@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <sys/time.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -18,8 +19,15 @@
 
 static const char *TAG = "ssd1306";
 static ssd1306_handle_t dev = NULL;
-static bool test_running;
+static QueueHandle_t oled_queue_handle;
+static oled_queue_message_t oled_msg;
+
 time_t g_now;
+void oled_event(char *content)
+{
+    ESP_LOGI(TAG, "content: %s", content);
+    xQueueSend(oled_queue_handle, content, 10 / portTICK_PERIOD_MS);
+}
 static void i2c_bus_init(void)
 {
     i2c_config_t conf;
@@ -79,24 +87,43 @@ esp_err_t ssd1306_show_signs(ssd1306_handle_t dev)
 
     return ssd1306_refresh_gram(dev);
 }
+esp_err_t ssd1306_show_string(ssd1306_handle_t dev, char *str)
+{
+    size_t len = strlen(str);
+    ssd1306_clear_screen(dev, 0x00);
+    for (size_t i = 0; i < len; i++)
+    {
+        ssd1306_draw_char(dev, 2 + i * 8, 10, *(str + i), 16, 4);
+    }
+    return ssd1306_refresh_gram(dev);
+}
 static void ssd1306_test_task(void *pvParameters)
 {
     esp_err_t ret;
     ESP_LOGI(TAG, "OLED task start");
+    memset(oled_msg.content, 0, 64);
     i2c_bus_init();
     dev = ssd1306_create(I2C_MASTER_NUM, SSD1306_I2C_ADDRESS);
     ret = ssd1306_refresh_gram(dev);
-    ret = ssd1306_show_signs(dev);
-     while (true) {
-        ret = ssd1306_show_time(dev);
-        TEST_ASSERT_EQUAL_MESSAGE(ESP_OK, ret, "SSD1306 show time returned error");
-
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-    for(;;);
+    ssd1306_clear_screen(dev, 0x00);
+    strcpy(oled_msg.content, "mandy");
+    // ret = ssd1306_show_signs(dev);
+    
+    while (true)
+    {
+        // ret = ssd1306_show_time(dev);
+        if (xQueueReceive(oled_queue_handle, (void *)&oled_msg, (portTickType)portMAX_DELAY))
+        {
+            ESP_LOGI("yang", "%s", oled_msg.content);
+            ret = ssd1306_show_string(dev, oled_msg.content);
+            // TEST_ASSERT_EQUAL_MESSAGE(ESP_OK, ret, "SSD1306 show time returned error");
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+        }
+    }    
 }
 
-void ssd1306_app( void )
-{    
+void ssd1306_app(void)
+{
+    oled_queue_handle = xQueueCreate(3, sizeof(oled_queue_message_t));
     xTaskCreate(&ssd1306_test_task, "ssd1306_test_task", 2048 * 2, NULL, 5, NULL);
 }

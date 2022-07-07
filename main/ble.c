@@ -23,6 +23,7 @@
 #include "esp_bt_main.h"
 #include "ble.h"
 #include "wifi_app.h"
+#include "oled.h"
 
 #define GATTS_TABLE_TAG  "GATTS_SPP_DEMO"
 
@@ -549,6 +550,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                     char _msg[32];
                     memset(_msg, 0, 32);
                     strncpy(_msg,(char *)(p_data->write.value),p_data->write.len);
+                    oled_event(_msg);
                     char* s0 = strtok(_msg, ":"); 
                     char* s1 = strtok(NULL, "\0"); 
                     if( s1 != NULL )
