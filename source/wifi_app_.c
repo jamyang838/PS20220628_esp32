@@ -582,10 +582,12 @@ static void https_with_invalid_url(void)
  */
 static void http_native_request(void)
 {
+    ESP_LOGI("y1","y1");
     char output_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};   // Buffer to store response of http request
     int content_length = 0;
     esp_http_client_config_t config = {
-        .url = "http://httpbin.org/get",
+        .url = "http://192.168.50.232:55000/weatherforecast",        
+        // .url = "http://httpbin.org/get",
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
 

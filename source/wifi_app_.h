@@ -5,13 +5,3 @@
 void app_start(void);
 
 #endif /* MAIN_WIFI_APP_H_ */
-
-
-
-
-
-
-
-
-
-

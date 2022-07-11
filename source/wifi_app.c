@@ -5,6 +5,8 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "freertos/event_groups.h"
+#include "esp_http_client.h"
+
 #include "wifi_app.h"
 // #include "esp_wpa2.h"
 // #include "esp_system.h"
@@ -13,8 +15,11 @@
 // #include "freertos/task.h"
 // #include "esp_netif.h"
 
+#define MAX_HTTP_OUTPUT_BUFFER 2048
+
 static char *TAG = "Wife";
 static EventGroupHandle_t wifi_event_group;
+static void request( void );
 static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
@@ -57,6 +62,37 @@ static char ssid[32];
 static char password[64];
 static QueueHandle_t wifi_app_queue_handle;
 static wifi_app_queue_message_t m;
+void request( void )
+{
+    ESP_LOGI("y1","y1");
+    char output_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};
+    int content_length = 0;
+    esp_http_client_config_t config = {
+        .url = "http://192.168.50.232:55000/weatherforecast",        
+        // .url = "http://httpbin.org/get",
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_method(client, HTTP_METHOD_GET);
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+    } else {
+        content_length = esp_http_client_fetch_headers(client);
+        if (content_length < 0) {
+            ESP_LOGE(TAG, "HTTP client fetch headers failed");
+        } else {
+            int data_read = esp_http_client_read_response(client, output_buffer, MAX_HTTP_OUTPUT_BUFFER);
+            if (data_read >= 0) {
+                ESP_LOGI(TAG, "HTTP GET Status = %d, content_length = %d",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+                ESP_LOG_BUFFER_HEX(TAG, output_buffer, data_read);
+            } else {
+                ESP_LOGE(TAG, "Failed to read response");
+            }
+        }
+    }
+}
 void wifi_connect_event(wifi_app_message_e event_type, char *content)
 {
     m.msgID = event_type;
@@ -91,12 +127,11 @@ void wifi_app_start(void *arg)
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
     esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
     //******************************************
-
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
     for (;;)
-    {
+    {        
         if (xQueueReceive(wifi_app_queue_handle, (void *)&msg, (portTickType)portMAX_DELAY))
         {
             ESP_LOGI(TAG, "%d", msg.msgID);
@@ -122,8 +157,8 @@ void wifi_app_start(void *arg)
             default:
                 break;
             }
-        }
-        vTaskDelay(20 / portTICK_PERIOD_MS);
+        }        
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
 }
 
