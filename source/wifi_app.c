@@ -68,8 +68,8 @@ void request( void )
     char output_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};
     int content_length = 0;
     esp_http_client_config_t config = {
-        .url = "http://192.168.50.232:55000/weatherforecast",        
-        // .url = "http://httpbin.org/get",
+        // .url = "http://192.168.50.232:55000/weatherforecast",        
+        .url = "http://httpbin.org/get",
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     esp_http_client_set_method(client, HTTP_METHOD_GET);
@@ -92,6 +92,7 @@ void request( void )
             }
         }
     }
+    ESP_LOGI( TAG,"%d",esp_http_client_close(client));
 }
 void wifi_connect_event(wifi_app_message_e event_type, char *content)
 {
@@ -132,33 +133,34 @@ void wifi_app_start(void *arg)
     ESP_ERROR_CHECK(esp_wifi_start());
     for (;;)
     {        
-        if (xQueueReceive(wifi_app_queue_handle, (void *)&msg, (portTickType)portMAX_DELAY))
-        {
-            ESP_LOGI(TAG, "%d", msg.msgID);
-            ESP_LOGI(TAG, "%d", STA_SSID);
+        // if (xQueueReceive(wifi_app_queue_handle, (void *)&msg, (portTickType)portMAX_DELAY))
+        // {
+        //     ESP_LOGI(TAG, "%d", msg.msgID);
+        //     ESP_LOGI(TAG, "%d", STA_SSID);
 
-            switch (msg.msgID)
-            {
-            case STA_SSID:
-                ESP_LOGI("yang", "test4");
-                memset(ssid, 0, 32);
-                strcpy(ssid, msg.content);
-                ESP_LOGI(TAG, "ssid:%s", ssid);
-                break;
-            case STA_PASSWORD:
-                memset(password, 0, 64);
-                strcpy(password, msg.content);
-                ESP_LOGI(TAG, "password:%s", password);
-                break;
-            case STA_RECONNECT:
-                ESP_LOGI(TAG, "yes, connect");
-                wifi_reconnect(ssid, password);
-                break;
-            default:
-                break;
-            }
-        }        
-        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        //     switch (msg.msgID)
+        //     {
+        //     case STA_SSID:
+        //         ESP_LOGI("yang", "test4");
+        //         memset(ssid, 0, 32);
+        //         strcpy(ssid, msg.content);
+        //         ESP_LOGI(TAG, "ssid:%s", ssid);
+        //         break;
+        //     case STA_PASSWORD:
+        //         memset(password, 0, 64);
+        //         strcpy(password, msg.content);
+        //         ESP_LOGI(TAG, "password:%s", password);
+        //         break;
+        //     case STA_RECONNECT:
+        //         ESP_LOGI(TAG, "yes, connect");
+        //         wifi_reconnect(ssid, password);
+        //         break;
+        //     default:
+        //         break;
+        //     }
+        // }        
+        request();
+        vTaskDelay(10000 / portTICK_PERIOD_MS);
     }
 }
 
